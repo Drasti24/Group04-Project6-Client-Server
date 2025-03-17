@@ -14,7 +14,8 @@
 namespace fs = std::filesystem;
 
 // Generate a unique aircraft ID (randomized for now)
-std::string generate_aircraft_id() {
+std::string generate_aircraft_id() 
+{
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<int> dist(1000, 9999);
@@ -22,10 +23,13 @@ std::string generate_aircraft_id() {
 }
 
 // Find available telemetry files
-std::vector<std::string> find_telemetry_files() {
+std::vector<std::string> find_telemetry_files() 
+{
     std::vector<std::string> files;
-    for (const auto& entry : fs::directory_iterator(".")) {
-        if (entry.path().extension() == ".txt") {
+    for (const auto& entry : fs::directory_iterator(".")) 
+    {
+        if (entry.path().extension() == ".txt") 
+        {
             files.push_back(entry.path().filename().string());
         }
     }
@@ -33,14 +37,16 @@ std::vector<std::string> find_telemetry_files() {
 }
 
 // Trim leading spaces from a string
-std::string trim(const std::string& str) {
+std::string trim(const std::string& str) 
+{
     size_t first = str.find_first_not_of(" ");
     if (first == std::string::npos) return str;
     return str.substr(first);
 }
 
 // Function to send telemetry data
-void send_telemetry(const std::string& server_ip, const std::string& file_path, const std::string& aircraft_id) {
+void send_telemetry(const std::string& server_ip, const std::string& file_path, const std::string& aircraft_id) 
+{
     WSADATA wsa;
     SOCKET client_socket;
     struct sockaddr_in server_addr;
@@ -51,12 +57,14 @@ void send_telemetry(const std::string& server_ip, const std::string& file_path, 
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(5000);
 
-    if (InetPtonA(AF_INET, server_ip.c_str(), &server_addr.sin_addr) != 1) {
+    if (InetPtonA(AF_INET, server_ip.c_str(), &server_addr.sin_addr) != 1) 
+    {
         std::cerr << "[ERROR] Invalid IP address format.\n";
         return;
     }
 
-    if (connect(client_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
+    if (connect(client_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) 
+    {
         std::cerr << "[ERROR] Could not connect to server.\n";
         return;
     }
@@ -64,7 +72,8 @@ void send_telemetry(const std::string& server_ip, const std::string& file_path, 
     std::cout << "[CLIENT] Connected to server as " << aircraft_id << ".\n";
 
     std::ifstream file(file_path);
-    if (!file) {
+    if (!file) 
+    {
         std::cerr << "[ERROR] File not found: " << file_path << "\n";
         return;
     }
@@ -72,12 +81,14 @@ void send_telemetry(const std::string& server_ip, const std::string& file_path, 
     std::string line;
     bool firstLine = true;
 
-    while (std::getline(file, line)) {
+    while (std::getline(file, line)) 
+    {
         line = trim(line);  // Trim leading spaces
 
         if (line.empty()) continue; // Skip empty lines
 
-        if (firstLine) {
+        if (firstLine) 
+        {
             firstLine = false;  // Skip the first line (header)
             continue;
         }
@@ -86,7 +97,8 @@ void send_telemetry(const std::string& server_ip, const std::string& file_path, 
         std::stringstream ss(line);
         std::string timestamp, fuel_remaining;
 
-        if (std::getline(ss, timestamp, ',') && std::getline(ss, fuel_remaining, ',')) {
+        if (std::getline(ss, timestamp, ',') && std::getline(ss, fuel_remaining, ',')) 
+        {
             std::string data_to_send = aircraft_id + "," + timestamp + "," + fuel_remaining;
             send(client_socket, data_to_send.c_str(), data_to_send.length(), 0);
             std::cout << "[SENT] " << data_to_send << std::endl;
@@ -98,29 +110,33 @@ void send_telemetry(const std::string& server_ip, const std::string& file_path, 
     WSACleanup();
 }
 
-int main() {
-    std::string aircraft_id = generate_aircraft_id();
+int main(int argc, char* argv[]) 
+{
+    if (argc < 2) 
+    {
+        std::cerr << "[ERROR] Usage: Client.exe <Server_IP>\n";
+        return 1;
+    }
+    std::string server_ip = argv[1];  // Get the IP from the command-line argument
 
+    std::string aircraft_id = generate_aircraft_id();
     std::vector<std::string> telemetry_files = find_telemetry_files();
-    if (telemetry_files.empty()) {
+
+    if (telemetry_files.empty()) 
+    {
         std::cerr << "[ERROR] No telemetry files found.\n";
         return 1;
     }
 
-    std::cout << "\nAvailable telemetry files:\n";
-    for (size_t i = 0; i < telemetry_files.size(); ++i) {
-        std::cout << i + 1 << ". " << telemetry_files[i] << "\n";
-    }
+    // Let the user choose a telemetry file randomly
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<int> dist(0, telemetry_files.size() - 1);
+    int choice = dist(gen);  
 
-    int choice;
-    std::cout << "\nEnter the number of the file to send: ";
-    std::cin >> choice;
+    std::cout << "[CLIENT] Selected file: " << telemetry_files[choice] << "\n";
 
-    if (choice < 1 || choice > telemetry_files.size()) {
-        std::cerr << "[ERROR] Invalid selection.\n";
-        return 1;
-    }
-
-    send_telemetry("127.0.0.1", telemetry_files[choice - 1], aircraft_id);
+    send_telemetry(server_ip, telemetry_files[choice], aircraft_id);
     return 0;
 }
+
