@@ -92,7 +92,11 @@ void send_telemetry(const std::string& server_ip, const std::string& file_path, 
 
         if (std::getline(ss, timestamp, ',') && std::getline(ss, fuel_remaining, ',')) {
             std::string data_to_send = aircraft_id + "," + timestamp + "," + fuel_remaining;
-            send(client_socket, data_to_send.c_str(), data_to_send.length(), 0);
+            int result = send(client_socket, data_to_send.c_str(), data_to_send.length(), 0);
+            if (result == SOCKET_ERROR) {
+                std::cerr << "[ERROR] Failed to send data. Server might be down.\n";
+                break; // Stop sending further if server is unreachable
+            }
             std::cout << "[SENT] " << data_to_send << std::endl;
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
@@ -106,14 +110,10 @@ void send_telemetry(const std::string& server_ip, const std::string& file_path, 
 }
 
 
-int main(int argc, char* argv[])
+int main()
 {
-    if (argc < 2)
-    {
-        std::cerr << "[ERROR] Usage: Client.exe <Server_IP>\n";
-        return 1;
-    }
-    std::string server_ip = argv[1];  // Get the IP from the command-line argument
+    // HARDCODED IP 
+    std::string server_ip = "10.144.122.244";
 
     std::string aircraft_id = generate_aircraft_id();
     std::vector<std::string> telemetry_files = find_telemetry_files();
