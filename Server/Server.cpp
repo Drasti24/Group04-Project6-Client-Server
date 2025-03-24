@@ -21,7 +21,7 @@ std::mutex queue_mutex;  // Mutex for thread-safe queue access
 bool server_running = true;
 
 // Function to calculate fuel consumption
-double calculate_fuel_consumption(const std::vector<double>& fuel_levels) 
+double calculate_fuel_consumption(const std::vector<double>& fuel_levels)
 {
     if (fuel_levels.size() < 2) return 0.0; // Not enough data to calculate consumption
     double total_consumption = fuel_levels.front() - fuel_levels.back();
@@ -33,17 +33,36 @@ void handle_client(SOCKET client_socket) {
     char buffer[1024];
     int bytes_received;
     std::string aircraft_id;
+    fd_set read_fds;
+    struct timeval timeout;
 
     while (true) {
+        FD_ZERO(&read_fds);
+        FD_SET(client_socket, &read_fds);
+        timeout.tv_sec = 5;  // Wait for 5 seconds
+        timeout.tv_usec = 0;
+
+        int activity = select(0, &read_fds, nullptr, nullptr, &timeout);
+
+        if (activity == 0) {
+            std::cout << "[TIMEOUT] No data from " << aircraft_id << ", checking connection...\n";
+            continue; // Go back and wait again
+        }
+        else if (activity == SOCKET_ERROR) {
+            std::cerr << "[ERROR] select() failed for " << aircraft_id << "\n";
+            break;
+        }
+
         bytes_received = recv(client_socket, buffer, sizeof(buffer), 0);
 
         if (bytes_received == 0) {
-            std::cout << "[CLIENT DISCONNECTED] " << aircraft_id << std::endl;
+            std::cout << "[CLIENT DISCONNECTED] " << aircraft_id << " (Normal Disconnect)\n";
             break;
         }
         else if (bytes_received == SOCKET_ERROR) {
-            // Unexpected error (client crash, force quit, network issue)
-            std::cerr << "[ERROR] recv() failed for " << aircraft_id << std::endl;
+            int error_code = WSAGetLastError();
+            std::cerr << "[ERROR] recv() failed for " << aircraft_id
+                << " with error code: " << error_code << "\n";
             break;
         }
 
@@ -65,7 +84,6 @@ void handle_client(SOCKET client_socket) {
         }
     }
 
-    // Only calculate fuel consumption if the aircraft sent data
     if (!aircraft_id.empty() && !fuel_data[aircraft_id].empty()) {
         final_avg_fuel[aircraft_id] = calculate_fuel_consumption(fuel_data[aircraft_id]);
         std::cout << "[INFO] Flight ended for " << aircraft_id
@@ -75,20 +93,22 @@ void handle_client(SOCKET client_socket) {
     closesocket(client_socket);
 }
 
+
+
 // Thread worker function (Handles clients from queue)
-void client_worker() 
+void client_worker()
 {
-    while (server_running) 
+    while (server_running)
     {
         SOCKET client_socket;
         {
             std::lock_guard<std::mutex> lock(queue_mutex);
-            if (!client_queue.empty()) 
+            if (!client_queue.empty())
             {
                 client_socket = client_queue.front();
                 client_queue.pop();
             }
-            else 
+            else
             {
                 continue;
             }
@@ -97,7 +117,7 @@ void client_worker()
     }
 }
 
-int main() 
+int main()
 {
     WSADATA wsa;
     SOCKET server_socket, client_socket;
@@ -105,14 +125,14 @@ int main()
     int client_len = sizeof(client_addr);
 
     // Initialize Winsock
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) 
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
     {
         std::cerr << "[ERROR] WSAStartup failed.\n";
         return 1;
     }
 
     server_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_socket == INVALID_SOCKET) 
+    if (server_socket == INVALID_SOCKET)
     {
         std::cerr << "[ERROR] Failed to create socket.\n";
         WSACleanup();
@@ -123,7 +143,7 @@ int main()
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(5000);
 
-    if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) 
+    if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR)
     {
         std::cerr << "[ERROR] Bind failed.\n";
         closesocket(server_socket);
@@ -131,7 +151,7 @@ int main()
         return 1;
     }
 
-    if (listen(server_socket, 10) == SOCKET_ERROR) 
+    if (listen(server_socket, 10) == SOCKET_ERROR)
     {
         std::cerr << "[ERROR] Listen failed.\n";
         closesocket(server_socket);
@@ -142,7 +162,7 @@ int main()
     std::cout << "[SERVER] Listening on port 5000...\n";
 
     // Create a fixed-size thread pool (5 worker threads for handling clients)
-    for (int i = 0; i < 5; ++i) 
+    for (int i = 0; i < 5; ++i)
     {
         thread_pool.emplace_back(client_worker);
     }
@@ -151,16 +171,16 @@ int main()
     FD_ZERO(&master_set);
     FD_SET(server_socket, &master_set);
 
-    while (server_running) 
+    while (server_running)
     {
         read_fds = master_set;
         struct timeval timeout = { 1, 0 };  // 1-second timeout for checking new connections
         int activity = select(0, &read_fds, nullptr, nullptr, &timeout);
 
-        if (activity > 0 && FD_ISSET(server_socket, &read_fds)) 
+        if (activity > 0 && FD_ISSET(server_socket, &read_fds))
         {
             client_socket = accept(server_socket, (struct sockaddr*)&client_addr, &client_len);
-            if (client_socket == INVALID_SOCKET) 
+            if (client_socket == INVALID_SOCKET)
             {
                 std::cerr << "[ERROR] Failed to accept connection.\n";
                 continue;
@@ -177,7 +197,7 @@ int main()
     }
 
     // Clean up worker threads
-    for (auto& t : thread_pool) 
+    for (auto& t : thread_pool)
     {
         if (t.joinable()) t.join();
     }
