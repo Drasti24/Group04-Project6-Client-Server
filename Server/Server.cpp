@@ -33,23 +33,21 @@ void handle_client(SOCKET client_socket) {
     char buffer[1024];
     int bytes_received;
     std::string aircraft_id;
-    bool received_any_valid_data = false;  // Tracks if any valid data was received
 
     while (true) {
         bytes_received = recv(client_socket, buffer, sizeof(buffer), 0);
 
         if (bytes_received == 0) {
-            std::cout << "[CLIENT DISCONNECTED] " << aircraft_id << " (Graceful Disconnect)\n";
+            std::cout << "[CLIENT DISCONNECTED] " << aircraft_id << std::endl;
             break;
         }
         else if (bytes_received == SOCKET_ERROR) {
-            int error_code = WSAGetLastError();
-            std::cerr << "[ERROR] recv() failed for " << aircraft_id
-                << " with error code: " << error_code << "\n";
+            // Unexpected error (client crash, force quit, network issue)
+            std::cerr << "[ERROR] recv() failed for " << aircraft_id << std::endl;
             break;
         }
 
-        buffer[bytes_received] = '\0';  // Null-terminate the received data
+        buffer[bytes_received] = '\0';  // Null-terminate received data
 
         std::lock_guard<std::mutex> lock(data_mutex);
         std::cout << "[DATA RECEIVED] " << buffer << std::endl;
@@ -64,12 +62,11 @@ void handle_client(SOCKET client_socket) {
             double fuel_remaining = std::stod(fuel);
             fuel_data[received_aircraft_id].push_back(fuel_remaining);
             aircraft_id = received_aircraft_id;
-            received_any_valid_data = true;  // Mark that we received data
         }
     }
 
-    // After client disconnects (graceful or error), calculate average if data was received
-    if (received_any_valid_data && !aircraft_id.empty() && !fuel_data[aircraft_id].empty()) {
+    // Only calculate fuel consumption if the aircraft sent data
+    if (!aircraft_id.empty() && !fuel_data[aircraft_id].empty()) {
         final_avg_fuel[aircraft_id] = calculate_fuel_consumption(fuel_data[aircraft_id]);
         std::cout << "[INFO] Flight ended for " << aircraft_id
             << ". Average fuel consumption: " << final_avg_fuel[aircraft_id] << " per time unit.\n";

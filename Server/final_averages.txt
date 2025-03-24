@@ -1,8 +1,0 @@
-Aircraft: Plane_3511 | Average Fuel Consumption: 9.89231e-05 per time unit.
-Aircraft: Plane_2156 | Average Fuel Consumption: 0.0639106 per time unit.
-Aircraft: Plane_8556 | Average Fuel Consumption: 9.84e-05 per time unit.
-Aircraft: Plane_7843 | Average Fuel Consumption: 9.89375e-05 per time unit.
-Aircraft: Plane_5541 | Average Fuel Consumption: 9.75e-05 per time unit.
-Aircraft: Plane_4259 | Average Fuel Consumption: 0.0638316 per time unit.
-Aircraft: Plane_1696 | Average Fuel Consumption: 0.0641043 per time unit.
-Aircraft: Plane_5625 | Average Fuel Consumption: 0.0638316 per time unit.
