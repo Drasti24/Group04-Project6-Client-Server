@@ -44,25 +44,39 @@ std::string trim(const std::string& str)
     return str.substr(first);
 }
 
-// Function to send telemetry data
+// Function to send telemetry data with a message delimiter
 void send_telemetry(const std::string& server_ip, const std::string& file_path, const std::string& aircraft_id) {
     WSADATA wsa;
     SOCKET client_socket;
     struct sockaddr_in server_addr;
 
-    WSAStartup(MAKEWORD(2, 2), &wsa);
+    // Initialize Winsock
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        std::cerr << "[ERROR] WSAStartup failed.\n";
+        return;
+    }
+
     client_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (client_socket == INVALID_SOCKET) {
+        std::cerr << "[ERROR] Failed to create socket.\n";
+        WSACleanup();
+        return;
+    }
 
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(5000);
 
     if (InetPtonA(AF_INET, server_ip.c_str(), &server_addr.sin_addr) != 1) {
         std::cerr << "[ERROR] Invalid IP address format.\n";
+        closesocket(client_socket);
+        WSACleanup();
         return;
     }
 
     if (connect(client_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
         std::cerr << "[ERROR] Could not connect to server.\n";
+        closesocket(client_socket);
+        WSACleanup();
         return;
     }
 
@@ -71,6 +85,8 @@ void send_telemetry(const std::string& server_ip, const std::string& file_path, 
     std::ifstream file(file_path);
     if (!file) {
         std::cerr << "[ERROR] File not found: " << file_path << "\n";
+        closesocket(client_socket);
+        WSACleanup();
         return;
     }
 
@@ -82,6 +98,7 @@ void send_telemetry(const std::string& server_ip, const std::string& file_path, 
 
         if (line.empty()) continue;
 
+        // Skip the header line if present
         if (firstLine) {
             firstLine = false;
             continue;
@@ -91,13 +108,14 @@ void send_telemetry(const std::string& server_ip, const std::string& file_path, 
         std::string timestamp, fuel_remaining;
 
         if (std::getline(ss, timestamp, ',') && std::getline(ss, fuel_remaining, ',')) {
-            std::string data_to_send = aircraft_id + "," + timestamp + "," + fuel_remaining;
+            // Append a newline as a delimiter at the end of the message.
+            std::string data_to_send = aircraft_id + "," + timestamp + "," + fuel_remaining + "\n";
             int result = send(client_socket, data_to_send.c_str(), data_to_send.length(), 0);
             if (result == SOCKET_ERROR) {
                 std::cerr << "[ERROR] Failed to send data. Server might be down.\n";
                 break; // Stop sending further if server is unreachable
             }
-            std::cout << "[SENT] " << data_to_send << std::endl;
+            std::cout << "[SENT] " << data_to_send;
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
     }
@@ -113,7 +131,7 @@ void send_telemetry(const std::string& server_ip, const std::string& file_path, 
 int main()
 {
     // HARDCODED IP 
-    std::string server_ip = "10.144.122.244";
+    std::string server_ip = "192.168.25.108";
 
     std::string aircraft_id = generate_aircraft_id();
     std::vector<std::string> telemetry_files = find_telemetry_files();
