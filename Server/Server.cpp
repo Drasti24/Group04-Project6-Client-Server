@@ -10,6 +10,7 @@
 #include <fstream>
 #include <string>
 #include <chrono>
+#include <windows.h> // For SetConsoleTextAttribute
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -22,9 +23,14 @@ std::mutex queue_mutex;                // Mutex for thread-safe queue access
 
 bool server_running = true;
 
+// Helper function to set console text color
+void setConsoleColor(WORD attributes) {
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    SetConsoleTextAttribute(hConsole, attributes);
+}
+
 // Function to calculate fuel consumption
-double calculate_fuel_consumption(const std::vector<double>& fuel_levels)
-{
+double calculate_fuel_consumption(const std::vector<double>& fuel_levels) {
     if (fuel_levels.size() < 2) return 0.0; // Not enough data to calculate consumption
     double total_consumption = fuel_levels.front() - fuel_levels.back();
     return total_consumption / (fuel_levels.size() - 1);
@@ -42,13 +48,17 @@ void handle_client(SOCKET client_socket) {
     while (true) {
         bytes_received = recv(client_socket, temp_buffer, BUF_SIZE, 0);
         if (bytes_received == 0) {
+            setConsoleColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
             std::cout << "[CLIENT DISCONNECTED] " << aircraft_id << " (Graceful Disconnect)\n";
+            setConsoleColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
             break;
         }
         else if (bytes_received == SOCKET_ERROR) {
             int error_code = WSAGetLastError();
+            setConsoleColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
             std::cerr << "[ERROR] recv() failed for " << aircraft_id
                 << " with error code: " << error_code << "\n";
+            setConsoleColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
             break;
         }
 
@@ -64,16 +74,17 @@ void handle_client(SOCKET client_socket) {
 
             {
                 std::lock_guard<std::mutex> lock(data_mutex);
+                // Display received message in cyan
+                setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_INTENSITY);
                 std::cout << "[DATA RECEIVED] " << message << std::endl;
+                setConsoleColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
             }
 
             std::stringstream ss(message);
             std::string received_aircraft_id, timestamp, fuel;
-
             if (std::getline(ss, received_aircraft_id, ',') &&
                 std::getline(ss, timestamp, ',') &&
                 std::getline(ss, fuel, ',')) {
-
                 try {
                     double fuel_remaining = std::stod(fuel);
                     {
@@ -81,14 +92,18 @@ void handle_client(SOCKET client_socket) {
                         fuel_data[received_aircraft_id].push_back(fuel_remaining);
                     }
                     aircraft_id = received_aircraft_id;
-                    received_any_valid_data = true;  // Mark that we received data
+                    received_any_valid_data = true;
                 }
                 catch (const std::exception& e) {
+                    setConsoleColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
                     std::cerr << "[ERROR] Parsing fuel value failed: " << e.what() << "\n";
+                    setConsoleColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
                 }
             }
             else {
+                setConsoleColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
                 std::cerr << "[ERROR] Message format incorrect: " << message << "\n";
+                setConsoleColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
             }
         }
     }
@@ -100,16 +115,17 @@ void handle_client(SOCKET client_socket) {
             std::lock_guard<std::mutex> lock(data_mutex);
             final_avg_fuel[aircraft_id] = avg;
         }
+        setConsoleColor(FOREGROUND_GREEN | FOREGROUND_INTENSITY);
         std::cout << "[INFO] Flight ended for " << aircraft_id
             << ". Average fuel consumption: " << avg << " per time unit.\n";
+        setConsoleColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
     }
 
     closesocket(client_socket);
 }
 
 // Thread worker function (handles clients from the queue)
-void client_worker()
-{
+void client_worker() {
     while (server_running) {
         SOCKET client_socket;
         {
@@ -119,7 +135,6 @@ void client_worker()
                 client_queue.pop();
             }
             else {
-                // Sleep briefly to avoid busy waiting when the queue is empty.
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
@@ -128,8 +143,7 @@ void client_worker()
     }
 }
 
-int main()
-{
+int main() {
     WSADATA wsa;
     SOCKET server_socket, client_socket;
     struct sockaddr_in server_addr, client_addr;
@@ -137,13 +151,17 @@ int main()
 
     // Initialize Winsock
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        setConsoleColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
         std::cerr << "[ERROR] WSAStartup failed.\n";
+        setConsoleColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
         return 1;
     }
 
     server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket == INVALID_SOCKET) {
+        setConsoleColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
         std::cerr << "[ERROR] Failed to create socket.\n";
+        setConsoleColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
         WSACleanup();
         return 1;
     }
@@ -153,20 +171,26 @@ int main()
     server_addr.sin_port = htons(5000);
 
     if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
+        setConsoleColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
         std::cerr << "[ERROR] Bind failed.\n";
+        setConsoleColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
         closesocket(server_socket);
         WSACleanup();
         return 1;
     }
 
     if (listen(server_socket, 10) == SOCKET_ERROR) {
+        setConsoleColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
         std::cerr << "[ERROR] Listen failed.\n";
+        setConsoleColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
         closesocket(server_socket);
         WSACleanup();
         return 1;
     }
 
+    setConsoleColor(FOREGROUND_GREEN | FOREGROUND_INTENSITY);
     std::cout << "[SERVER] Listening on port 5000...\n";
+    setConsoleColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
 
     // Create a fixed-size thread pool (5 worker threads)
     for (int i = 0; i < 5; ++i) {
@@ -181,17 +205,17 @@ int main()
         read_fds = master_set;
         struct timeval timeout = { 1, 0 };  // 1-second timeout for checking new connections
         int activity = select(0, &read_fds, nullptr, nullptr, &timeout);
-
         if (activity > 0 && FD_ISSET(server_socket, &read_fds)) {
             client_socket = accept(server_socket, (struct sockaddr*)&client_addr, &client_len);
             if (client_socket == INVALID_SOCKET) {
+                setConsoleColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
                 std::cerr << "[ERROR] Failed to accept connection.\n";
+                setConsoleColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
                 continue;
             }
-
+            setConsoleColor(FOREGROUND_GREEN | FOREGROUND_INTENSITY);
             std::cout << "[NEW CLIENT] Connected.\n";
-
-            // Add client to queue for worker threads to handle
+            setConsoleColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
             {
                 std::lock_guard<std::mutex> lock(queue_mutex);
                 client_queue.push(client_socket);
