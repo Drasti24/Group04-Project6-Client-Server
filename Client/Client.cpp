@@ -9,6 +9,7 @@
 #include <random>
 #include <sstream>
 #include <windows.h> // For console color functions
+#include <ctime>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -35,8 +36,10 @@ std::string generate_aircraft_id() {
 // Find available telemetry files
 std::vector<std::string> find_telemetry_files() {
     std::vector<std::string> files;
-    for (const auto& entry : fs::directory_iterator(".")) {
-        if (entry.path().extension() == ".txt") {
+    for (const auto& entry : fs::directory_iterator(fs::current_path()))
+    {
+        if (entry.path().extension() == ".txt")
+        {
             files.push_back(entry.path().filename().string());
         }
     }
@@ -50,7 +53,12 @@ std::string trim(const std::string& str) {
     return str.substr(first);
 }
 
-// Function to send telemetry data with a message delimiter
+// Check for shutdown: returns true if shutdown.txt exists.
+bool shutdown_requested(const fs::path& shutdownFile) {
+    return fs::exists(shutdownFile);
+}
+
+// Function to send telemetry data with graceful shutdown checks
 void send_telemetry(const std::string& server_ip, const std::string& file_path, const std::string& aircraft_id) {
     WSADATA wsa;
     SOCKET client_socket;
@@ -98,6 +106,9 @@ void send_telemetry(const std::string& server_ip, const std::string& file_path, 
     std::cout << "[CLIENT] Connected to server as " << aircraft_id << ".\n";
     ResetColor();
 
+    // Print current working directory for debugging.
+    std::cout << "[CLIENT] Current directory: " << fs::current_path() << "\n";
+
     std::ifstream file(file_path);
     if (!file) {
         SetColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
@@ -108,18 +119,26 @@ void send_telemetry(const std::string& server_ip, const std::string& file_path, 
         return;
     }
 
+    // Build shutdown file path
+    fs::path shutdownFile = fs::current_path() / "shutdown.txt";
+
     std::string line;
     bool firstLine = true;
 
     while (std::getline(file, line)) {
+        // Check for shutdown command at the beginning of each loop iteration.
+        if (shutdown_requested(shutdownFile)) {
+            SetColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
+            std::cout << "[CLIENT] Shutdown command received. Exiting gracefully.\n";
+            ResetColor();
+            break;
+        }
         line = trim(line);
         if (line.empty()) continue;
-        // Skip header line if present
-        if (firstLine) {
+        if (firstLine) { // Skip header if present
             firstLine = false;
             continue;
         }
-
         std::stringstream ss(line);
         std::string timestamp, fuel_remaining;
         if (std::getline(ss, timestamp, ',') && std::getline(ss, fuel_remaining, ',')) {
@@ -135,11 +154,20 @@ void send_telemetry(const std::string& server_ip, const std::string& file_path, 
             SetColor(FOREGROUND_GREEN | FOREGROUND_INTENSITY);
             std::cout << "[SENT] " << data_to_send;
             ResetColor();
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            // Instead of a full 1-second sleep, break it into 10 segments of 100 ms to check for shutdown.
+            for (int i = 0; i < 10; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (shutdown_requested(shutdownFile)) {
+                    SetColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
+                    std::cout << "[CLIENT] Shutdown command received during sleep. Exiting gracefully.\n";
+                    ResetColor();
+                    goto exit_loop;
+                }
+            }
         }
     }
+exit_loop:
 
-    // Gracefully close connection
     shutdown(client_socket, SD_BOTH);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     closesocket(client_socket);
@@ -156,12 +184,10 @@ int main() {
     if (telemetry_files.empty()) {
         SetColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
         std::cerr << "[ERROR] No telemetry files found.\n";
-
         ResetColor();
         return 1;
     }
 
-    // Let the user choose a telemetry file randomly
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<int> dist(0, static_cast<int>(telemetry_files.size()) - 1);

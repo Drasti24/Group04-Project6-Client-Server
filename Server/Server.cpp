@@ -11,6 +11,7 @@
 #include <string>
 #include <chrono>
 #include <windows.h> // For console color functions
+#include <csignal>   // For signal handling
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -29,12 +30,12 @@ void ResetColor() {
 std::mutex color_mutex;
 std::map<std::string, WORD> aircraft_colors;
 std::vector<WORD> available_colors = {
-    FOREGROUND_GREEN | FOREGROUND_INTENSITY,                     // Bright Green
-    FOREGROUND_RED | FOREGROUND_INTENSITY,                       // Bright Red
-    FOREGROUND_BLUE | FOREGROUND_INTENSITY,                      // Bright Blue
-    FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_INTENSITY,      // Yellow
-    FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY,     // Cyan
-    FOREGROUND_RED | FOREGROUND_BLUE | FOREGROUND_INTENSITY        // Magenta
+    FOREGROUND_GREEN | FOREGROUND_INTENSITY,     // Bright Green
+    FOREGROUND_RED | FOREGROUND_INTENSITY,       // Bright Red
+    FOREGROUND_BLUE | FOREGROUND_INTENSITY,      // Bright Blue
+    FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_INTENSITY, // Yellow
+    FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY, // Cyan
+    FOREGROUND_RED | FOREGROUND_BLUE | FOREGROUND_INTENSITY   // Magenta
 };
 size_t next_color_index = 0;
 
@@ -47,20 +48,33 @@ WORD get_color_for_aircraft(const std::string& aircraft_id) {
     return aircraft_colors[aircraft_id];
 }
 
+// Structure to maintain running average for fuel statistics
+struct FuelStats {
+    double sum = 0.0;
+    size_t count = 0;
+};
+
 std::mutex data_mutex;
-std::unordered_map<std::string, std::vector<double>> fuel_data; // Fuel history per aircraft
-std::unordered_map<std::string, double> final_avg_fuel;         // Final fuel consumption per aircraft
-std::vector<std::thread> thread_pool;                             // Store client threads
-std::queue<SOCKET> client_queue;                                  // Queue to manage client connections
-std::mutex queue_mutex;                                           // Mutex for thread-safe queue access
+std::unordered_map<std::string, FuelStats> fuel_stats;  // Running stats per aircraft
+std::unordered_map<std::string, double> final_avg_fuel;   // Final fuel consumption per aircraft
+std::vector<std::thread> thread_pool;                     // Store client threads
+std::queue<SOCKET> client_queue;                          // Queue to manage client connections
+std::mutex queue_mutex;                                   // Mutex for thread-safe queue access
 
-bool server_running = true;
+volatile std::sig_atomic_t server_running = 1;
 
-// Function to calculate fuel consumption
-double calculate_fuel_consumption(const std::vector<double>& fuel_levels) {
-    if (fuel_levels.size() < 2) return 0.0; // Not enough data to calculate consumption
-    double total_consumption = fuel_levels.front() - fuel_levels.back();
-    return total_consumption / (fuel_levels.size() - 1);
+// Signal handler for Ctrl+C
+void signal_handler(int signal) {
+    if (signal == SIGINT) {
+        server_running = 0;
+        std::cout << "\n[SERVER] Shutdown signal received. Stopping server gracefully...\n";
+    }
+}
+
+// Function to calculate fuel consumption (running average)
+double calculate_fuel_consumption(const FuelStats& stats) {
+    if (stats.count == 0) return 0.0;
+    return stats.sum / static_cast<double>(stats.count);
 }
 
 // Function to store final average consumption in a text file
@@ -84,13 +98,14 @@ void handle_client(SOCKET client_socket) {
     setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
 
     const int BUF_SIZE = 1024;
-    char temp_buffer[BUF_SIZE];
+    // Increase buffer size by 1 for null terminator.
+    char temp_buffer[BUF_SIZE + 1];
     std::string data_buffer;  // Buffer to store partial data
     int bytes_received;
     std::string aircraft_id;
     bool received_any_valid_data = false;  // Tracks if any valid data was received
 
-    while (true) {
+    while (server_running) {
         bytes_received = recv(client_socket, temp_buffer, BUF_SIZE, 0);
         if (bytes_received == 0) {
             WORD client_color = aircraft_id.empty() ? (FOREGROUND_RED | FOREGROUND_INTENSITY)
@@ -119,7 +134,7 @@ void handle_client(SOCKET client_socket) {
             }
         }
 
-        // Append the received data to our buffer and null-terminate
+        // Null-terminate the received data safely.
         temp_buffer[bytes_received] = '\0';
         data_buffer.append(temp_buffer);
 
@@ -129,17 +144,18 @@ void handle_client(SOCKET client_socket) {
             std::string message = data_buffer.substr(0, pos);
             data_buffer.erase(0, pos + 1);  // Remove the processed message
 
-            // Parse the message to get the aircraft ID
+            // Parse the message to extract the aircraft ID, timestamp, and fuel
             std::stringstream ss(message);
             std::string received_aircraft_id, timestamp, fuel;
             if (std::getline(ss, received_aircraft_id, ',') &&
                 std::getline(ss, timestamp, ',') &&
                 std::getline(ss, fuel, ',')) {
                 try {
-                    double fuel_remaining = std::stod(fuel);
+                    double fuel_value = std::stod(fuel);
                     {
                         std::lock_guard<std::mutex> lock(data_mutex);
-                        fuel_data[received_aircraft_id].push_back(fuel_remaining);
+                        fuel_stats[received_aircraft_id].sum += fuel_value;
+                        fuel_stats[received_aircraft_id].count++;
                     }
                     aircraft_id = received_aircraft_id;
                     received_any_valid_data = true;
@@ -167,9 +183,9 @@ void handle_client(SOCKET client_socket) {
         }
     }
 
-    // After client disconnects or timeout, calculate average if data was received
-    if (received_any_valid_data && !aircraft_id.empty() && !fuel_data[aircraft_id].empty()) {
-        double avg = calculate_fuel_consumption(fuel_data[aircraft_id]);
+    // After client disconnects or timeout, calculate and store the final average if data was received
+    if (received_any_valid_data && !aircraft_id.empty() && fuel_stats[aircraft_id].count > 0) {
+        double avg = calculate_fuel_consumption(fuel_stats[aircraft_id]);
         {
             std::lock_guard<std::mutex> lock(data_mutex);
             final_avg_fuel[aircraft_id] = avg;
@@ -206,6 +222,9 @@ void client_worker() {
 }
 
 int main() {
+    // Install the signal handler for Ctrl+C
+    std::signal(SIGINT, signal_handler);
+
     WSADATA wsa;
     SOCKET server_socket, client_socket;
     struct sockaddr_in server_addr, client_addr;
@@ -265,7 +284,7 @@ int main() {
 
     while (server_running) {
         read_fds = master_set;
-        struct timeval timeout = { 1, 0 };
+        struct timeval timeout = { 1, 0 };  // 1-second timeout for checking new connections
         int activity = select(0, &read_fds, nullptr, nullptr, &timeout);
         if (activity > 0 && FD_ISSET(server_socket, &read_fds)) {
             client_socket = accept(server_socket, (struct sockaddr*)&client_addr, &client_len);
