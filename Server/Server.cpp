@@ -7,18 +7,20 @@
 #include <vector>
 #include <sstream>
 #include <queue>
+#include <set>
 #include <fstream>
 #include <string>
 #include <chrono>
-#include <windows.h>   // For console color functions
-#include <csignal>     // For signal handling
+#include <windows.h>     // For console color functions
+#include <csignal>       // For signal handling
 #include <condition_variable>
-#include <map>
+#include <atomic>
 
 #pragma comment(lib, "ws2_32.lib")
 
-// Our Helper functions for console color
-
+// ------------------------------
+// Minimal Logging Helpers
+// ------------------------------
 void SetColor(WORD attributes) {
     HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
     SetConsoleTextAttribute(hConsole, attributes);
@@ -27,8 +29,10 @@ void ResetColor() {
     SetColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
 }
 
-// Global variables and data structures
-
+// ------------------------------
+// Global Variables & Data Structures
+// ------------------------------
+#include <map>
 std::mutex color_mutex;
 std::map<std::string, WORD> aircraft_colors;
 std::vector<WORD> available_colors = {
@@ -40,7 +44,6 @@ std::vector<WORD> available_colors = {
     FOREGROUND_RED | FOREGROUND_BLUE | FOREGROUND_INTENSITY
 };
 size_t next_color_index = 0;
-
 WORD get_color_for_aircraft(const std::string& aircraft_id) {
     std::lock_guard<std::mutex> lock(color_mutex);
     if (aircraft_colors.find(aircraft_id) == aircraft_colors.end()) {
@@ -50,68 +53,98 @@ WORD get_color_for_aircraft(const std::string& aircraft_id) {
     return aircraft_colors[aircraft_id];
 }
 
-// This is teh structure to maintain running fuel statistics.
+// Structure to keep fuel consumption stats.
 struct FuelStats {
     double sum = 0.0;
     size_t count = 0;
 };
 
 std::mutex data_mutex;
-std::unordered_map<std::string, FuelStats> fuel_stats;  // Running the stats per aircraft
-std::unordered_map<std::string, double> final_avg_fuel;   // Final fuel consumption per aircraft
+std::unordered_map<std::string, FuelStats> fuel_stats;  // Running stats per aircraft
+std::unordered_map<std::string, double> final_avg_fuel;   // Final averages
 
-// Global vector to accumulate messages (this simulates heavy memory usage: store each message 10 times).
+// Global vector for incoming messages .
+// In this version, we store each message only once.
 std::vector<std::string> all_messages;
 std::mutex messages_mutex;
 
-// Thread pool and client connection queue.
+// Queue for client sockets and worker threads.
 std::vector<std::thread> thread_pool;
 std::queue<SOCKET> client_queue;
 std::mutex queue_mutex;
 std::condition_variable cv;
 
-volatile std::sig_atomic_t server_running = 1;  // Global flag for server running
+// Global flag to indicate server is running.
+volatile std::sig_atomic_t server_running = 1;
 
-// Signal Handler (Ctrl+C is used for shutting down here)
+// Tracks number of currently active clients in a thread-safe manner for idle detection and memory cleanup
+std::atomic<int> active_clients(0);
+
+// Timestamp to track the last network activity.
+std::chrono::steady_clock::time_point lastActivity;
+
+// ------------------------------
+// Memory Monitor Thread Function
+// Checks every second if all_messages exceeds a threshold and flushes it.
+void memory_monitor() {
+    const size_t MAX_BUFFER_SIZE = 10000;  
+    while (server_running) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        std::lock_guard<std::mutex> lock(messages_mutex);
+        if (all_messages.size() > MAX_BUFFER_SIZE) {
+            all_messages.clear();
+            all_messages.shrink_to_fit();
+            std::cout << "[MEMORY MONITOR] Buffer exceeded threshold; flushing messages.\n";
+        }
+    }
+}
+
+// ------------------------------
+// Signal Handler
+// ------------------------------
 void signal_handler(int signal) {
     if (signal == SIGINT) {
         server_running = 0;
         std::cout << "\n[SERVER] Shutdown signal received. Stopping server gracefully...\n";
-        cv.notify_all();
+        cv.notify_all();  // Wake up worker threads.
     }
 }
 
-
-// Function to calculate running average fuel consumption
+// ------------------------------
+// Processing Functions
+// ------------------------------
 double calculate_fuel_consumption(const FuelStats& stats) {
-    if (stats.count == 0) return 0.0;
+    if (stats.count == 0)
+        return 0.0;
     return stats.sum / static_cast<double>(stats.count);
 }
 
-// Function to store the final average in a text file
-void store_final_result(const std::string& aircraft_id, double average) {
+void store_all_final_results() {
     std::ofstream outfile("final_results.txt", std::ios::app);
-    if (outfile.is_open()) {
-        outfile << "Aircraft: " << aircraft_id << " | Average Fuel Consumption: " << average << "\n";
-        outfile.close();
-    }
-    else {
+    if (!outfile.is_open()) {
         SetColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
         std::cerr << "[ERROR] Could not open final_results.txt for writing.\n";
         ResetColor();
+        return;
     }
+
+    std::lock_guard<std::mutex> lock(data_mutex); // protect access to final_avg_fuel
+
+    for (const auto& [aircraft_id, avg] : final_avg_fuel) {
+        outfile << "Aircraft: " << aircraft_id
+            << " | Average Fuel Consumption: " << avg << "\n";
+    }
+
+    outfile.close();
 }
 
-// Process a complete message received from a client. This function saves multiple copies of the message (to simulate degraded memory usage),parses the message (expected format: aircraftID,timestamp,fuel_remaining),and updates the running fuel statistics.
+
+// Process a complete message. Minimal logging.
 void process_message(const std::string& message, std::string& aircraft_id, bool& received_any_valid_data) {
-    // Save each message 10 times to simulate heavy memory usage.
     {
         std::lock_guard<std::mutex> lock(messages_mutex);
-        for (int i = 0; i < 10; ++i) {
-            all_messages.push_back(message);
-        }
+        all_messages.push_back(message);
     }
-
     std::stringstream ss(message);
     std::string received_aircraft_id, timestamp, fuel;
     if (std::getline(ss, received_aircraft_id, ',') &&
@@ -126,31 +159,23 @@ void process_message(const std::string& message, std::string& aircraft_id, bool&
             }
             aircraft_id = received_aircraft_id;
             received_any_valid_data = true;
-            // Print received data in the assigned color.
-            WORD client_color = get_color_for_aircraft(received_aircraft_id);
-            {
-                std::lock_guard<std::mutex> lock(data_mutex);
-                SetColor(client_color);
-                std::cout << "[DATA RECEIVED] " << message << std::endl;
-                ResetColor();
-            }
         }
         catch (const std::exception& e) {
-            SetColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
-            std::cerr << "[ERROR] Parsing fuel value failed: " << e.what() << "\n";
-            ResetColor();
+            (void)e; // Suppress unreferenced variable warning.
         }
+
     }
-    else {
-        SetColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
-        std::cerr << "[ERROR] Message format incorrect: " << message << "\n";
-        ResetColor();
-    }
+    if (received_aircraft_id.empty() || timestamp.empty() || fuel.empty())
+        return; 
+
 }
 
-// Function to handle an individual client connection. It reads data from the socket, processes complete messages delimited by newline, and when the client disconnects, it calculates the final average and stores it.
+// ------------------------------
+// Client Handling Function
+// ------------------------------
 void handle_client(SOCKET client_socket) {
-    int timeout = 15000; // 15-second timeout
+    // Set a 30-second receive timeout.
+    int timeout = 30000;
     setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
 
     const int BUF_SIZE = 1024;
@@ -162,38 +187,21 @@ void handle_client(SOCKET client_socket) {
 
     while (server_running) {
         bytes_received = recv(client_socket, temp_buffer, BUF_SIZE, 0);
-        if (bytes_received == 0) 
-        {
-            // Client disconnected gracefully.
-            WORD client_color = aircraft_id.empty() ? (FOREGROUND_RED | FOREGROUND_INTENSITY)
-                : get_color_for_aircraft(aircraft_id);
-            SetColor(client_color);
-            std::cout << "[CLIENT DISCONNECTED] " << aircraft_id << " (Graceful Disconnect)\n";
-            ResetColor();
-            break;
+        if (bytes_received == 0) {
+            break; // Client disconnected gracefully.
         }
         else if (bytes_received == SOCKET_ERROR) {
             int error_code = WSAGetLastError();
-            if (error_code == WSAETIMEDOUT) {
-                WORD client_color = aircraft_id.empty() ? (FOREGROUND_RED | FOREGROUND_INTENSITY)
-                    : get_color_for_aircraft(aircraft_id);
-                SetColor(client_color);
-                std::cout << "[TIMEOUT] No data received for 15 seconds. Finalizing connection for " << aircraft_id << ".\n";
-                ResetColor();
+            if (error_code == WSAETIMEDOUT)
                 break;
-            }
-            else {
-                SetColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
-                std::cerr << "[ERROR] recv() failed for " << aircraft_id << " with error code: " << error_code << "\n";
-                ResetColor();
+            else
                 break;
-            }
         }
-
         temp_buffer[bytes_received] = '\0';
         data_buffer.append(temp_buffer);
+        lastActivity = std::chrono::steady_clock::now();
 
-        // Process complete messages (delimited by newline)
+        // Process complete messages .
         size_t pos;
         while ((pos = data_buffer.find("\n")) != std::string::npos) {
             std::string message = data_buffer.substr(0, pos);
@@ -201,9 +209,7 @@ void handle_client(SOCKET client_socket) {
             process_message(message, aircraft_id, received_any_valid_data);
         }
     }
-
-    // Flush remaining data in the buffer.
-
+    // Flush any leftover data.
     if (!data_buffer.empty()) {
         data_buffer.push_back('\n');
         size_t pos;
@@ -213,27 +219,27 @@ void handle_client(SOCKET client_socket) {
             process_message(message, aircraft_id, received_any_valid_data);
         }
     }
-
-    // On client disconnect, if any valid data was received, compute and store final average.
-
+    // Finalize if valid data was received, calculate and store final average.
     if (received_any_valid_data && !aircraft_id.empty() && fuel_stats[aircraft_id].count > 0) {
         double avg = calculate_fuel_consumption(fuel_stats[aircraft_id]);
         {
             std::lock_guard<std::mutex> lock(data_mutex);
             final_avg_fuel[aircraft_id] = avg;
         }
-        SetColor(get_color_for_aircraft(aircraft_id));
-        std::cout << "[INFO] Flight ended for " << aircraft_id << ". Average fuel consumption: "
-            << avg << "\n";
+    }
+    else {
+        SetColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
+        std::cerr << "[WARNING] No valid data received from " << aircraft_id << "\n";
         ResetColor();
-        store_final_result(aircraft_id, avg);
     }
 
     closesocket(client_socket);
+    active_clients.fetch_sub(1);  // Decrement active client count.
 }
 
-// Worker thread function: retrieves clients from the queue and processes them.
-
+// ------------------------------
+// Worker Thread Function
+// ------------------------------
 void client_worker() {
     while (server_running) {
         SOCKET client_socket = INVALID_SOCKET;
@@ -252,9 +258,12 @@ void client_worker() {
     }
 }
 
-// Main Function: sets up networking, starts worker threads, and accepts connections.
+// ------------------------------
+// Main Function
+// ------------------------------
 int main() {
     std::signal(SIGINT, signal_handler);
+    lastActivity = std::chrono::steady_clock::now();
 
     WSADATA wsa;
     SOCKET server_socket, client_socket;
@@ -262,17 +271,13 @@ int main() {
     int client_len = sizeof(client_addr);
 
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        SetColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
         std::cerr << "[ERROR] WSAStartup failed.\n";
-        ResetColor();
         return 1;
     }
 
     server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket == INVALID_SOCKET) {
-        SetColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
         std::cerr << "[ERROR] Failed to create socket.\n";
-        ResetColor();
         WSACleanup();
         return 1;
     }
@@ -282,50 +287,47 @@ int main() {
     server_addr.sin_port = htons(5000);
 
     if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        SetColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
         std::cerr << "[ERROR] Bind failed.\n";
-        ResetColor();
         closesocket(server_socket);
         WSACleanup();
         return 1;
     }
 
-    // server uses a backlog 
     if (listen(server_socket, 10) == SOCKET_ERROR) {
-        SetColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
         std::cerr << "[ERROR] Listen failed.\n";
-        ResetColor();
         closesocket(server_socket);
         WSACleanup();
         return 1;
     }
 
+    // Minimal logging: announce server is listening.
     SetColor(FOREGROUND_GREEN | FOREGROUND_INTENSITY);
     std::cout << "[SERVER] Listening on port 5000...\n";
     ResetColor();
 
-    // Start a fixed number (5) of worker threads.
+    // Start worker threads.
     for (int i = 0; i < 5; ++i) {
         thread_pool.emplace_back(client_worker);
     }
 
-    // Main loop: accept new client connections.
+    // Start memory monitor thread.
+    std::thread memMonitor(memory_monitor);
+
+    active_clients.store(0);
+
     fd_set master_set, read_fds;
     FD_ZERO(&master_set);
     FD_SET(server_socket, &master_set);
 
+    // Main loop: accept new clients.
     while (server_running) {
         read_fds = master_set;
-        struct timeval timeout = { 1, 0 };  // 1-second timeout
-        int activity = select(0, &read_fds, nullptr, nullptr, &timeout);
+        struct timeval timeout_val = { 1, 0 };  // 1-second select timeout.
+        int activity = select(0, &read_fds, nullptr, nullptr, &timeout_val);
         if (activity > 0 && FD_ISSET(server_socket, &read_fds)) {
             client_socket = accept(server_socket, (struct sockaddr*)&client_addr, &client_len);
-            if (client_socket == INVALID_SOCKET) {
-                SetColor(FOREGROUND_RED | FOREGROUND_INTENSITY);
-                std::cerr << "[ERROR] Failed to accept connection.\n";
-                ResetColor();
+            if (client_socket == INVALID_SOCKET)
                 continue;
-            }
             SetColor(FOREGROUND_GREEN | FOREGROUND_INTENSITY);
             std::cout << "[NEW CLIENT] Connected.\n";
             ResetColor();
@@ -334,6 +336,20 @@ int main() {
                 client_queue.push(client_socket);
             }
             cv.notify_one();
+            lastActivity = std::chrono::steady_clock::now();
+            active_clients.fetch_add(1);
+        }
+        // When there are no active clients and no activity for 30 seconds, it will flush extra memory.
+        auto now = std::chrono::steady_clock::now();
+        if (active_clients.load() == 0 &&
+            std::chrono::duration_cast<std::chrono::seconds>(now - lastActivity).count() >= 30) {
+            std::lock_guard<std::mutex> lock(messages_mutex);
+            if (!all_messages.empty()) {
+                all_messages.clear();
+                all_messages.shrink_to_fit();
+                std::cout << "[INFO] All clients ended; memory flushed.\n";
+            }
+            lastActivity = now;
         }
     }
 
@@ -343,13 +359,20 @@ int main() {
             t.join();
     }
 
+    server_running = 0;
+    if (memMonitor.joinable())
+        memMonitor.join();
+
+    {
+        std::lock_guard<std::mutex> lock(messages_mutex);
+        all_messages.clear();
+        all_messages.shrink_to_fit();
+    }
+
+    // Final buffered write of all results
+    store_all_final_results();
+
     closesocket(server_socket);
     WSACleanup();
     return 0;
 }
-
-
-
-
-
-
